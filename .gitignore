@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+daycare_ogg/
+_full_decode.wav
+_probe.wav
+_probe.ogg
+_*.wav
