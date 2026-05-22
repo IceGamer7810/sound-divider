@@ -1,5 +1,6 @@
 import math
 import os
+import shutil
 import subprocess
 import wave
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -139,6 +140,34 @@ def probe_input_audio_params(path: Path) -> tuple[int, int] | None:
 
     If probing fails, return None and the pipeline will fall back to the VLC-decoded WAV params.
     """
+    if FFPROBE_PATH is not None:
+        try:
+            result = subprocess.run(
+                [
+                    FFPROBE_PATH,
+                    '-v',
+                    'error',
+                    '-select_streams',
+                    'a:0',
+                    '-show_entries',
+                    'stream=sample_rate,channels',
+                    '-of',
+                    'default=noprint_wrappers=1:nokey=1',
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            out = (result.stdout or '').strip().splitlines()
+            if len(out) >= 2:
+                sr = int(out[0].strip())
+                ch = int(out[1].strip())
+                if sr > 0 and ch > 0:
+                    return sr, ch
+        except Exception:
+            pass
+
 
     suf = path.suffix.lower()
     if suf == ".wav":
@@ -187,11 +216,13 @@ def find_vlc():
 
 VLC_PATH = find_vlc()
 
-if VLC_PATH is None:
-    print("\nVLC nincs telepítve!\n")
+FFMPEG_PATH = shutil.which("ffmpeg")
+FFPROBE_PATH = shutil.which("ffprobe")
+
+if FFMPEG_PATH is None and VLC_PATH is None:
+    print("\nSem az ffmpeg, sem a VLC nincs el?rhet? (PATH / telep?t?s).\n")
     input("ENTER...")
     raise SystemExit
-
 
 CODEC_MAP = {
     "ogg": ("vorbis", "ogg"),
@@ -358,6 +389,27 @@ def vlc_transcode_to_wav_with_params(
 
     return wav_path.exists() and wav_path.stat().st_size > 0
 
+def ffmpeg_decode_to_wav(
+    input_path: Path,
+    wav_path: Path,
+    *,
+    samplerate: int | None,
+    channels: int | None,
+) -> bool:
+    if FFMPEG_PATH is None:
+        return False
+
+    cmd = [FFMPEG_PATH, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(input_path)]
+    if samplerate is not None:
+        cmd += ['-ar', str(samplerate)]
+    if channels is not None:
+        cmd += ['-ac', str(channels)]
+    cmd += ['-c:a', 'pcm_s16le', str(wav_path)]
+
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    return wav_path.exists() and wav_path.stat().st_size > 0
+
+
 
 def vlc_transcode_file(
     input_path: Path,
@@ -403,11 +455,45 @@ def vlc_transcode_file(
     return output_path.exists() and output_path.stat().st_size > 0
 
 
+def ffmpeg_encode_file(
+    input_path: Path,
+    output_path: Path,
+    extension: str,
+    *,
+    samplerate: int | None,
+    channels: int | None,
+) -> bool:
+    if FFMPEG_PATH is None:
+        return False
+
+    ext = extension.lower().replace('.', '')
+    cmd = [FFMPEG_PATH, '-y', '-hide_banner', '-loglevel', 'error', '-i', str(input_path)]
+    if samplerate is not None:
+        cmd += ['-ar', str(samplerate)]
+    if channels is not None:
+        cmd += ['-ac', str(channels)]
+
+    if ext == 'ogg':
+        cmd += ['-c:a', 'libvorbis', '-q:a', '4']
+    elif ext == 'mp3':
+        cmd += ['-c:a', 'libmp3lame', '-q:a', '4']
+    elif ext == 'wav':
+        cmd += ['-c:a', 'pcm_s16le']
+    elif ext == 'flac':
+        cmd += ['-c:a', 'flac']
+    else:
+        cmd += ['-c:a', 'libvorbis']
+
+    cmd += [str(output_path)]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    return output_path.exists() and output_path.stat().st_size > 0
+
+
 def verify_duration_via_wav_decode(media_path: Path, expected_seconds: float):
     tmp = media_path.with_name(f"_{media_path.stem}__verify.wav")
     tmp.unlink(missing_ok=True)
 
-    ok = vlc_transcode_to_wav(media_path, tmp)
+    ok = ffmpeg_decode_to_wav(media_path, tmp, samplerate=None, channels=None) if FFMPEG_PATH is not None else vlc_transcode_to_wav(media_path, tmp)
     if not ok:
         tmp.unlink(missing_ok=True)
         return False
@@ -424,7 +510,7 @@ def transcode_one_task(args):
     in_wav_s, out_s, ext, rate, ch = args
     in_wav = Path(in_wav_s)
     out_path = Path(out_s)
-    ok = vlc_transcode_file(in_wav, out_path, ext, samplerate=rate, channels=ch)
+    ok = ffmpeg_encode_file(in_wav, out_path, ext, samplerate=rate, channels=ch) if FFMPEG_PATH is not None else vlc_transcode_file(in_wav, out_path, ext, samplerate=rate, channels=ch)
     return in_wav_s, out_s, ok
 
 
@@ -485,12 +571,9 @@ def split_media(
         forced_rate = target_samplerate
         forced_channels = target_channels
 
-    if not vlc_transcode_to_wav_with_params(
-        input_path,
-        full_wav_path,
-        samplerate=forced_rate,
-        channels=forced_channels,
-    ):
+    ok = ffmpeg_decode_to_wav(input_path, full_wav_path, samplerate=forced_rate, channels=forced_channels) if FFMPEG_PATH is not None else vlc_transcode_to_wav_with_params(input_path, full_wav_path, samplerate=forced_rate, channels=forced_channels)
+
+    if not ok:
         print("\nNem sikerült WAV-ba dekódolni a bemeneti fájlt.\n")
         return
 
