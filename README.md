@@ -1,6 +1,7 @@
 ﻿# sound-divider
 
-Windows-only audio splitter for Minecraft resource packs.
+Windows-only audio splitter mainly for Minecraft resource packs.
+Works with almost every audio file- and even with some video file formats!
 
 ## Requirements
 - Windows
